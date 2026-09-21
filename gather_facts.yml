@@ -56,25 +56,16 @@
       command: zypper --non-interactive lu
       register: zypper_lu
       changed_when: false
-      when: ansible_os_family == "Suse"
+      when: ansible_os_family == "SUSE Linux Enterprise Server 15 SP7"
 
-    - name: Check SCC/SUMA registration status
-      command: SUSEConnect -s
-      register: suseconnect_status
-      changed_when: false
-      when: ansible_os_family == "Suse"
 
     - name: Check for processes needing restart after patching (zypper ps -s)
       command: zypper ps -s
       register: zypper_ps
       changed_when: false
-      when: ansible_os_family == "Suse"
+      when: ansible_os_family == "SUSE Linux Enterprise Server 15 SP7"
 
-    - name: Check for Debian/Ubuntu upgradable packages (non-SUSE fallback)
-      shell: "apt list --upgradable 2>/dev/null | tail -n +2 || true"
-      register: apt_upgradable
-      changed_when: false
-      when: ansible_os_family == "Debian"
+
 
     - name: Check whether a reboot is pending
       stat:
@@ -89,10 +80,6 @@
       register: realm_status
       changed_when: false
 
-    - name: Check SSSD domain status
-      command: sssctl domain-list
-      register: sssd_domains
-      changed_when: false
 
     - name: Check nsswitch.conf passwd/group lines (sss/winbind split-brain risk)
       command: grep -E "^(passwd|group):" /etc/nsswitch.conf
@@ -121,21 +108,7 @@
       register: falcon_status
       changed_when: false
 
-    # ---------------------------------------------------------------------
-    # Software AG / middleware processes of interest
-    # ---------------------------------------------------------------------
-    - name: Look for Software AG / middleware / print-management processes
-      shell: >
-        ps -eo comm,pid,args | grep -Ei
-        'adanuc|natural|entirex|applinx|tomcat|om\.?plus|rpmelite|ctdb|smbd|winbind'
-        | grep -v grep || true
-      register: interesting_processes
-      changed_when: false
 
-    - name: Check ksh build/version (known drift issue in this estate)
-      shell: "rpm -q ksh 2>/dev/null || dpkg -l ksh 2>/dev/null || ksh --version 2>&1 || true"
-      register: ksh_version
-      changed_when: false
 
     # ---------------------------------------------------------------------
     # Capacity / health signals
@@ -165,13 +138,6 @@
     - name: Get listening ports
       shell: "ss -tulnp 2>/dev/null | awk 'NR>1 {print $1,$5}' || true"
       register: listening_ports
-      changed_when: false
-
-    - name: Get running containers (docker or podman, if present)
-      shell: >
-        (docker ps --format '{% raw %}{{.Names}} {{.Image}} {{.Status}}{% endraw %}' 2>/dev/null) ||
-        (podman ps --format '{% raw %}{{.Names}} {{.Image}} {{.Status}}{% endraw %}' 2>/dev/null) || true
-      register: containers
       changed_when: false
 
     # ---------------------------------------------------------------------
