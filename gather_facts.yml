@@ -1,0 +1,213 @@
+---
+# gather_host_info.yml
+#
+# Purpose:
+#   Run across a mixed Linux/SLES estate and collect, per host:
+#     - Full hostname (FQDN) and OS/version/kernel
+#     - IP addresses
+#     - "Interesting" operational signals for this environment:
+#         patching/registration state, AD/SSSD join status, Pacemaker
+#         cluster membership, CrowdStrike Falcon sensor state, Software AG /
+#         middleware processes, ksh version, containers, disk/memory/uptime,
+#         listening ports.
+#
+#   Writes one Markdown report per host plus a fleet-wide summary
+#   (CSV + Markdown table) on the Ansible control node.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini gather_host_info.yml
+#   ansible-playbook -i inventory.ini gather_host_info.yml --limit avbob_estate
+#   ansible-playbook -i inventory.ini gather_host_info.yml -e report_dir=/tmp/host-reports
+#
+#   From AWX/Ansible Tower: create a Job Template pointing at this playbook
+#   against the relevant inventory; the admin_rr SSH key already distributed
+#   across the p*/d*/q* estate can be used as the machine credential.
+#
+# Output:
+#   <report_dir>/<inventory_hostname>.md   -- one report per host
+#   <report_dir>/summary.csv               -- one row per host
+#   <report_dir>/summary.md                -- human-readable fleet table
+#
+- name: Gather host identity and interesting operational info
+  hosts: all
+  gather_facts: true
+  become: true
+  ignore_errors: true          # keep going across a heterogeneous/flaky estate
+  vars:
+    report_dir: "./host-reports"
+
+  tasks:
+    # ---------------------------------------------------------------------
+    # Core identity
+    # ---------------------------------------------------------------------
+    - name: Get FQDN via hostname -f (authoritative, falls back to ansible_fqdn)
+      command: hostname -f
+      register: fqdn_cmd
+      changed_when: false
+
+    - name: Set resolved FQDN
+      set_fact:
+        resolved_fqdn: "{{ fqdn_cmd.stdout | default(ansible_fqdn) | default(ansible_hostname) }}"
+
+    # ---------------------------------------------------------------------
+    # SUSE / zypper specific (skipped cleanly on non-SUSE hosts)
+    # ---------------------------------------------------------------------
+    - name: Check for pending patches (zypper lu)
+      command: zypper --non-interactive lu
+      register: zypper_lu
+      changed_when: false
+      when: ansible_os_family == "Suse"
+
+    - name: Check SCC/SUMA registration status
+      command: SUSEConnect -s
+      register: suseconnect_status
+      changed_when: false
+      when: ansible_os_family == "Suse"
+
+    - name: Check for processes needing restart after patching (zypper ps -s)
+      command: zypper ps -s
+      register: zypper_ps
+      changed_when: false
+      when: ansible_os_family == "Suse"
+
+    - name: Check for Debian/Ubuntu upgradable packages (non-SUSE fallback)
+      shell: "apt list --upgradable 2>/dev/null | tail -n +2 || true"
+      register: apt_upgradable
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Check whether a reboot is pending
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    # ---------------------------------------------------------------------
+    # AD / Kerberos / SSSD join status
+    # ---------------------------------------------------------------------
+    - name: Check realm / AD join status
+      command: realm list
+      register: realm_status
+      changed_when: false
+
+    - name: Check SSSD domain status
+      command: sssctl domain-list
+      register: sssd_domains
+      changed_when: false
+
+    - name: Check nsswitch.conf passwd/group lines (sss/winbind split-brain risk)
+      command: grep -E "^(passwd|group):" /etc/nsswitch.conf
+      register: nsswitch_check
+      changed_when: false
+
+    # ---------------------------------------------------------------------
+    # Pacemaker / Corosync HA cluster status
+    # ---------------------------------------------------------------------
+    - name: Check if this host has Pacemaker's crm_mon
+      stat:
+        path: /usr/sbin/crm_mon
+      register: crm_present
+
+    - name: Get Pacemaker cluster status (crm_mon)
+      command: crm_mon -1 -r
+      register: crm_status
+      changed_when: false
+      when: crm_present.stat.exists | default(false)
+
+    # ---------------------------------------------------------------------
+    # Security agents
+    # ---------------------------------------------------------------------
+    - name: Check CrowdStrike Falcon sensor status
+      command: systemctl is-active falcon-sensor
+      register: falcon_status
+      changed_when: false
+
+    # ---------------------------------------------------------------------
+    # Software AG / middleware processes of interest
+    # ---------------------------------------------------------------------
+    - name: Look for Software AG / middleware / print-management processes
+      shell: >
+        ps -eo comm,pid,args | grep -Ei
+        'adanuc|natural|entirex|applinx|tomcat|om\.?plus|rpmelite|ctdb|smbd|winbind'
+        | grep -v grep || true
+      register: interesting_processes
+      changed_when: false
+
+    - name: Check ksh build/version (known drift issue in this estate)
+      shell: "rpm -q ksh 2>/dev/null || dpkg -l ksh 2>/dev/null || ksh --version 2>&1 || true"
+      register: ksh_version
+      changed_when: false
+
+    # ---------------------------------------------------------------------
+    # Capacity / health signals
+    # ---------------------------------------------------------------------
+    - name: Get disk usage
+      shell: "df -hP | grep -vE '^Filesystem|tmpfs|cdrom'"
+      register: disk_usage
+      changed_when: false
+
+    - name: Get max disk usage percentage (for summary table)
+      shell: >
+        df -hP | grep -vE '^Filesystem|tmpfs|cdrom' |
+        awk '{gsub(/%/,"",$5); if ($5+0 > max) max=$5} END {print max"%"}'
+      register: max_disk_pct
+      changed_when: false
+
+    - name: Get memory usage
+      command: free -h
+      register: mem_usage
+      changed_when: false
+
+    - name: Get last boot time
+      command: uptime -s
+      register: last_boot
+      changed_when: false
+
+    - name: Get listening ports
+      shell: "ss -tulnp 2>/dev/null | awk 'NR>1 {print $1,$5}' || true"
+      register: listening_ports
+      changed_when: false
+
+    - name: Get running containers (docker or podman, if present)
+      shell: >
+        (docker ps --format '{% raw %}{{.Names}} {{.Image}} {{.Status}}{% endraw %}' 2>/dev/null) ||
+        (podman ps --format '{% raw %}{{.Names}} {{.Image}} {{.Status}}{% endraw %}' 2>/dev/null) || true
+      register: containers
+      changed_when: false
+
+    # ---------------------------------------------------------------------
+    # Per-host report (written on the control node)
+    # ---------------------------------------------------------------------
+    - name: Ensure report directory exists
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+      delegate_to: localhost
+      become: false
+
+    - name: Write per-host report
+      template:
+        src: templates/host_report.md.j2
+        dest: "{{ report_dir }}/{{ inventory_hostname }}.md"
+      delegate_to: localhost
+      become: false
+
+  # -------------------------------------------------------------------------
+  # Fleet-wide summary (runs once, after every host has reported in)
+  # -------------------------------------------------------------------------
+  post_tasks:
+    - name: Build fleet summary (CSV)
+      template:
+        src: templates/summary.csv.j2
+        dest: "{{ report_dir }}/summary.csv"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Build fleet summary (Markdown)
+      template:
+        src: templates/summary.md.j2
+        dest: "{{ report_dir }}/summary.md"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
