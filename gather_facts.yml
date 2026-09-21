@@ -34,7 +34,7 @@
   become: true
   ignore_errors: true          # keep going across a heterogeneous/flaky estate
   vars:
-    report_dir: "./host-reports"
+    report_dir: "./tmp/host-reports"
 
   tasks:
     # ---------------------------------------------------------------------
@@ -89,16 +89,16 @@
     # ---------------------------------------------------------------------
     # Pacemaker / Corosync HA cluster status
     # ---------------------------------------------------------------------
-    - name: Check if this host has Pacemaker's crm_mon
-      stat:
-        path: /usr/sbin/crm_mon
-      register: crm_present
+    # - name: Check if this host has Pacemaker's crm_mon
+    #   stat:
+    #     path: /usr/sbin/crm_mon
+    #   register: crm_present
 
-    - name: Get Pacemaker cluster status (crm_mon)
-      command: crm_mon -1 -r
-      register: crm_status
-      changed_when: false
-      when: crm_present.stat.exists | default(false)
+    # - name: Get Pacemaker cluster status (crm_mon)
+    #   command: crm_mon -1 -r
+    #   register: crm_status
+    #   changed_when: false
+    #   when: crm_present.stat.exists | default(false)
 
     # ---------------------------------------------------------------------
     # Security agents
@@ -131,7 +131,7 @@
       changed_when: false
 
     - name: Get last boot time
-      command: uptime -s
+      command: uptime 
       register: last_boot
       changed_when: false
 
@@ -143,37 +143,37 @@
     # ---------------------------------------------------------------------
     # Per-host report (written on the control node)
     # ---------------------------------------------------------------------
-    - name: Ensure report directory exists
-      file:
-        path: "{{ report_dir }}"
-        state: directory
-      delegate_to: localhost
-      become: false
+    # - name: Ensure report directory exists
+    #   file:
+    #     path: "{{ report_dir }}"
+    #     state: directory
+    #   delegate_to: localhost
+    #   become: false
 
-    - name: Write per-host report
-      template:
-        src: templates/host_report.md.j2
-        dest: "{{ report_dir }}/{{ inventory_hostname }}.md"
-      delegate_to: localhost
-      become: false
+    # - name: Write per-host report
+    #   template:
+    #     src: templates/host_report.md.j2
+    #     dest: "{{ report_dir }}/{{ inventory_hostname }}.md"
+    #   delegate_to: localhost
+    #   become: false
 
   # -------------------------------------------------------------------------
   # Fleet-wide summary (runs once, after every host has reported in)
   # -------------------------------------------------------------------------
-  post_tasks:
-    - name: Build fleet summary (CSV)
-      template:
-        src: templates/summary.csv.j2
-        dest: "{{ report_dir }}/summary.csv"
-      delegate_to: localhost
-      become: false
-      run_once: true
+  # post_tasks:
+  #   - name: Build fleet summary (CSV)
+  #     template:
+  #       src: templates/summary.csv.j2
+  #       dest: "{{ report_dir }}/summary.csv"
+  #     delegate_to: localhost
+  #     become: false
+  #     run_once: true
 
-    - name: Build fleet summary (Markdown)
-      template:
-        src: templates/summary.md.j2
-        dest: "{{ report_dir }}/summary.md"
-      delegate_to: localhost
-      become: false
-      run_once: true
+  #   - name: Build fleet summary (Markdown)
+  #     template:
+  #       src: templates/summary.md.j2
+  #       dest: "{{ report_dir }}/summary.md"
+  #     delegate_to: localhost
+  #     become: false
+  #     run_once: true
 
