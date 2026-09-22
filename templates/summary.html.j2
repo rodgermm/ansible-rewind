@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Fleet Summary — {{ now(fmt='%Y-%m-%d %H:%M UTC') }}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; background: #f7f7f8; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  .meta { color: #666; font-size: 0.85rem; margin-bottom: 1.5rem; }
+  table { border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  th, td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #e5e5e5; text-align: left; font-size: 0.9rem; }
+  th { background: #2b2f38; color: #fff; position: sticky; top: 0; }
+  tr:hover { background: #f0f4ff; }
+  .ok { color: #1a7f37; font-weight: 600; }
+  .warn { color: #9a6700; font-weight: 600; }
+  .bad { color: #c1121f; font-weight: 600; }
+  .findings { margin-top: 2rem; }
+  .findings li { margin-bottom: 0.35rem; }
+</style>
+</head>
+<body>
+<h1>Fleet Summary</h1>
+<div class="meta">Generated {{ now(fmt='%Y-%m-%d %H:%M UTC') }} &mdash; {{ ansible_play_hosts_all | length }} hosts</div>
+
+<table>
+<thead>
+<tr>
+  <th>Host</th><th>FQDN</th><th>OS</th><th>Facts OK</th>
+  <th>Reboot Pending</th><th>AD Joined</th><th>Falcon</th>
+  <th>Max Disk %</th><th>Patches Pending</th>
+</tr>
+</thead>
+<tbody>
+{% for h in ansible_play_hosts_all %}
+{% set hv = hostvars[h] %}
+{% set facts_ok = (hv.ansible_facts is defined and hv.ansible_facts | length > 0) %}
+{% set falcon = hv.falcon_status.stdout | default('unknown') if hv.falcon_status is defined else 'unknown' %}
+{% set reboot = (hv.reboot_required_file is defined and hv.reboot_required_file.stat is defined and hv.reboot_required_file.stat.exists | default(false)) %}
+{% set disk_pct = hv.max_disk_pct.stdout | default('0') | int %}
+{% set patches = 'yes' if (hv.zypper_lu is defined and hv.zypper_lu.stdout is defined and hv.zypper_lu.stdout | trim | length > 0) else ('n/a' if not (hv.zypper_lu is defined) else 'no') %}
+<tr>
+  <td>{{ h }}</td>
+  <td>{{ hv.resolved_fqdn | default(h) }}</td>
+  <td>{{ hv.ansible_distribution | default('unknown') }} {{ hv.ansible_distribution_version | default('') }}</td>
+  <td class="{{ 'ok' if facts_ok else 'bad' }}">{{ 'OK' if facts_ok else 'FAILED' }}</td>
+  <td class="{{ 'bad' if reboot else 'ok' }}">{{ 'YES' if reboot else 'no' }}</td>
+  <td>{{ 'yes' if (hv.realm_status is defined and hv.realm_status.stdout is defined and hv.realm_status.stdout | trim | length > 0) else 'no' }}</td>
+  <td class="{{ 'ok' if falcon == 'active' else ('bad' if facts_ok else 'warn') }}">{{ falcon }}</td>
+  <td class="{{ 'bad' if disk_pct >= 85 else ('warn' if disk_pct >= 70 else 'ok') }}">{{ hv.max_disk_pct.stdout | default('?') }}%</td>
+  <td class="{{ 'warn' if patches == 'yes' else '' }}">{{ patches }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<div class="findings">
+<h2>Findings requiring attention</h2>
+<ul>
+{% for h in ansible_play_hosts_all %}
+{% set hv = hostvars[h] %}
+{% set facts_ok = (hv.ansible_facts is defined and hv.ansible_facts | length > 0) %}
+{% if not facts_ok %}
+<li class="bad">{{ h }}: fact gathering failed (interpreter <code>{{ hv.discovered_interpreter_python | default('unknown') }}</code> could not run modules) &mdash; all data missing.</li>
+{% endif %}
+{% if hv.falcon_status is defined and hv.falcon_status.stdout is defined and hv.falcon_status.stdout | trim != 'active' %}
+<li class="warn">{{ h }}: Falcon sensor is <code>{{ hv.falcon_status.stdout | trim }}</code>.</li>
+{% endif %}
+{% if hv.reboot_required_file is defined and hv.reboot_required_file.stat is defined and hv.reboot_required_file.stat.exists | default(false) %}
+<li class="warn">{{ h }}: reboot pending.</li>
+{% endif %}
+{% if hv.max_disk_pct is defined and hv.max_disk_pct.stdout is defined and (hv.max_disk_pct.stdout | default('0') | int) >= 85 %}
+<li class="bad">{{ h }}: disk usage at {{ hv.max_disk_pct.stdout }}%.</li>
+{% endif %}
+{% endfor %}
+</ul>
+</div>
+</body>
+</html>

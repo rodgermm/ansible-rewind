@@ -1,0 +1,64 @@
+# Host Report: {{ inventory_hostname }}
+
+*Generated: {{ now(fmt='%Y-%m-%d %H:%M UTC') }}*
+
+{% if ansible_facts is not defined or ansible_facts | length == 0 %}
+> **Fact gathering failed on this host.** Discovered interpreter:
+> `{{ discovered_interpreter_python | default('unknown') }}`. Every field
+> below is unavailable or defaulted because of that failure -- see the
+> notes at the bottom of gather_facts.yml for how to diagnose it.
+{% endif %}
+
+## Identity
+- **FQDN:** {{ resolved_fqdn | default(inventory_hostname) }}
+- **OS:** {{ ansible_distribution | default('unknown') }} {{ ansible_distribution_version | default('') }} ({{ ansible_os_family | default('unknown') }})
+- **Kernel:** {{ ansible_kernel | default('unknown') }}
+- **Python interpreter:** {{ discovered_interpreter_python | default(ansible_python_interpreter | default('unknown')) }}
+- **IPv4 addresses:** {{ (ansible_all_ipv4_addresses | default([]) | join(', ')) if (ansible_all_ipv4_addresses is defined and ansible_all_ipv4_addresses | length > 0) else 'unavailable' }}
+
+## Patching / reboot
+**Pending patches (zypper lu):**
+```
+{{ zypper_lu.stdout | default('not applicable / not collected on this host') }}
+```
+
+**Processes needing restart (zypper ps -s):**
+```
+{{ zypper_ps.stdout | default('not applicable / not collected on this host') }}
+```
+
+**Reboot pending:** {{ 'YES' if (reboot_required_file is defined and reboot_required_file.stat is defined and reboot_required_file.stat.exists | default(false)) else 'no / unknown' }}
+
+## Identity & directory integration
+**realm list:**
+```
+{{ realm_status.stdout | default('unavailable (no realm binary or check did not run)') }}
+```
+
+**nsswitch.conf passwd/group lines:**
+```
+{{ nsswitch_check.stdout | default('unavailable') }}
+```
+
+## Security agent
+**CrowdStrike Falcon sensor:** {{ falcon_status.stdout | default('unknown') }}
+
+## Capacity
+**Max disk usage:** {{ max_disk_pct.stdout | default('unknown') }}%
+
+**Disk usage detail:**
+```
+{{ disk_usage.stdout | default('unavailable') }}
+```
+
+**Memory:**
+```
+{{ mem_usage.stdout | default('unavailable') }}
+```
+
+**Uptime / last boot:** {{ last_boot.stdout | default('unknown') }}
+
+## Listening ports
+```
+{{ listening_ports.stdout | default('unavailable') }}
+```

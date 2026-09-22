@@ -1,5 +1,5 @@
 ---
-# gather_host_info.yml
+# gather_facts.yml  (enhanced)
 #
 # Purpose:
 #   Run across a mixed Linux/SLES estate and collect, per host:
@@ -12,21 +12,61 @@
 #         listening ports.
 #
 #   Writes one Markdown report per host plus a fleet-wide summary
-#   (CSV + Markdown table) on the Ansible control node.
+#   (CSV + Markdown table + HTML dashboard) to report_host -- a real,
+#   persistent host in the inventory (default: dsagnfs01), NOT the AWX
+#   execution pod. See the report_host/report_dir note in vars: below.
+#
+# CHANGELOG vs. the version that produced job_42.txt:
+#   1. FIXED the zypper `when` conditional. ansible_os_family is a *family*
+#      classifier -- for SLES it is always "Suse", never the full string
+#      "SUSE Linux Enterprise Server 15 SP7". That literal string can never
+#      match, which is why the patch/process-restart checks were skipped
+#      on every single host in the run, including the real SLES boxes.
+#   2. Added failed_when: false to commands whose "failure" is actually
+#      valid data -- e.g. `systemctl is-active falcon-sensor` returns rc=4
+#      for an installed-but-stopped service. Without this, the task shows
+#      as FAILED in the recap even though "inactive" is exactly the answer
+#      we wanted, and it drowns out the fact that this run *did* find 3
+#      hosts with Falcon down.
+#   3. Fixed "Set resolved FQDN": the original chained
+#      `default(ansible_fqdn) | default(ansible_hostname)`, and on a host
+#      where fact-gathering itself failed (dadabas01), ansible_hostname is
+#      completely undefined -- not just empty -- so evaluating it as a
+#      default() *argument* throws before default() ever gets to run. Each
+#      fallback below is coerced to a concrete value first, and the chain
+#      always bottoms out on inventory_hostname, which can never be
+#      undefined.
+#   4. Re-enabled and implemented the report-writing tasks. They were fully
+#      commented out in the source file -- that's the actual reason no
+#      report was ever produced, independent of the failures above.
+#   5. Added an HTML dashboard (summary.html) alongside the CSV/Markdown
+#      summary so results can be opened directly in a browser and shared,
+#      not just grepped from a CSV.
+#   6. Every template reference to a fact/register now goes through
+#      `default(...)`, so a host that fails fact-gathering (like dadabas01
+#      did) still gets a row in the report instead of aborting the
+#      template render.
+#
+# Known issue this run surfaced -- see the long note at the bottom of this
+# file: dadabas01's `/usr/bin/python3` cannot execute ANY Ansible module.
 #
 # Usage:
-#   ansible-playbook -i inventory.ini gather_host_info.yml
-#   ansible-playbook -i inventory.ini gather_host_info.yml --limit avbob_estate
-#   ansible-playbook -i inventory.ini gather_host_info.yml -e report_dir=/tmp/host-reports
+#   ansible-playbook -i inventory.ini gather_facts.yml
+#   ansible-playbook -i inventory.ini gather_facts.yml --limit avbob_estate
+#   ansible-playbook -i inventory.ini gather_facts.yml -e report_host=qentirex01
 #
 #   From AWX/Ansible Tower: create a Job Template pointing at this playbook
 #   against the relevant inventory; the admin_rr SSH key already distributed
 #   across the p*/d*/q* estate can be used as the machine credential.
+#   IMPORTANT under AWX (Kubernetes/Operator): jobs run in an ephemeral pod,
+#   so reports are written to report_host over SSH, not to the job's own
+#   filesystem -- see the vars: block below before changing this.
 #
-# Output:
+# Output (on report_host, in report_dir):
 #   <report_dir>/<inventory_hostname>.md   -- one report per host
 #   <report_dir>/summary.csv               -- one row per host
 #   <report_dir>/summary.md                -- human-readable fleet table
+#   <report_dir>/summary.html              -- shareable fleet dashboard
 #
 - name: Gather host identity and interesting operational info
   hosts: all
@@ -34,7 +74,26 @@
   become: true
   ignore_errors: true          # keep going across a heterogeneous/flaky estate
   vars:
-    report_dir: "./tmp/host-reports"
+    # --- Report location -----------------------------------------------
+    # Under AWX (Operator / Kubernetes), every job runs in a fresh,
+    # throwaway pod -- "localhost" INSIDE that job is the pod itself, not
+    # a real disk. Anything written there (including $HOME) is deleted the
+    # moment the job finishes, no matter how "absolute" the path looks.
+    #
+    # So the report-writing tasks below delegate to a real, persistent
+    # host that's already part of this play's inventory instead of
+    # localhost -- report_host. dsagnfs01 is used as the default because
+    # its name suggests it's already the Software AG NFS host for this
+    # estate, i.e. exactly the kind of shared, durable storage this
+    # belongs on. Override it for a different estate/environment, e.g.:
+    #   ansible-playbook gather_facts.yml -e report_host=qentirex01
+    #
+    # If you later mount a persistent volume into the AWX execution
+    # environment itself (via the AWX Operator custom resource), you can
+    # switch report_host back to "localhost" -- until then, a real
+    # inventory host is the only thing that actually persists.
+    report_host: "dsagnfs01"
+    report_dir: "/opt/ansible-reports/host-facts"
 
   tasks:
     # ---------------------------------------------------------------------
@@ -44,28 +103,38 @@
       command: hostname -f
       register: fqdn_cmd
       changed_when: false
+      failed_when: false
 
     - name: Set resolved FQDN
       set_fact:
-        resolved_fqdn: "{{ fqdn_cmd.stdout | default(ansible_fqdn) | default(ansible_hostname) }}"
+        resolved_fqdn: >-
+          {{ (fqdn_cmd.stdout | default('', true) | trim)
+             or (ansible_fqdn | default('', true))
+             or (ansible_hostname | default('', true))
+             or inventory_hostname }}
 
     # ---------------------------------------------------------------------
     # SUSE / zypper specific (skipped cleanly on non-SUSE hosts)
+    #
+    # FIX: was `when: ansible_os_family == "SUSE Linux Enterprise Server 15 SP7"`
+    # -- os_family is just "Suse" on every SLES release. If you specifically
+    # need to gate on SP7, use ansible_distribution_version instead, e.g.:
+    #   when: ansible_os_family | default('') == "Suse" and
+    #         ansible_distribution_version | default('') is version('15.7', '==')
     # ---------------------------------------------------------------------
     - name: Check for pending patches (zypper lu)
       command: zypper --non-interactive lu
       register: zypper_lu
       changed_when: false
-      when: ansible_os_family == "SUSE Linux Enterprise Server 15 SP7"
-
+      failed_when: false
+      when: ansible_os_family | default('') == "Suse"
 
     - name: Check for processes needing restart after patching (zypper ps -s)
       command: zypper ps -s
       register: zypper_ps
       changed_when: false
-      when: ansible_os_family == "SUSE Linux Enterprise Server 15 SP7"
-
-
+      failed_when: false
+      when: ansible_os_family | default('') == "Suse"
 
     - name: Check whether a reboot is pending
       stat:
@@ -79,36 +148,26 @@
       command: realm list
       register: realm_status
       changed_when: false
-
+      failed_when: false        # no `realm` binary / not joined is data, not a failure
 
     - name: Check nsswitch.conf passwd/group lines (sss/winbind split-brain risk)
       command: grep -E "^(passwd|group):" /etc/nsswitch.conf
       register: nsswitch_check
       changed_when: false
-
-    # ---------------------------------------------------------------------
-    # Pacemaker / Corosync HA cluster status
-    # ---------------------------------------------------------------------
-    # - name: Check if this host has Pacemaker's crm_mon
-    #   stat:
-    #     path: /usr/sbin/crm_mon
-    #   register: crm_present
-
-    # - name: Get Pacemaker cluster status (crm_mon)
-    #   command: crm_mon -1 -r
-    #   register: crm_status
-    #   changed_when: false
-    #   when: crm_present.stat.exists | default(false)
+      failed_when: false
 
     # ---------------------------------------------------------------------
     # Security agents
+    #
+    # FIX: `systemctl is-active` returns rc=4 for an inactive-but-installed
+    # unit -- that used to register as a task FAILURE. It's real fleet
+    # data: this run shows Falcon down on dapplinx01, dentirex01, dsagnfs01.
     # ---------------------------------------------------------------------
     - name: Check CrowdStrike Falcon sensor status
       command: systemctl is-active falcon-sensor
       register: falcon_status
       changed_when: false
-
-
+      failed_when: false
 
     # ---------------------------------------------------------------------
     # Capacity / health signals
@@ -117,63 +176,116 @@
       shell: "df -hP | grep -vE '^Filesystem|tmpfs|cdrom'"
       register: disk_usage
       changed_when: false
+      failed_when: false
 
     - name: Get max disk usage percentage (for summary table)
       shell: >
         df -hP | grep -vE '^Filesystem|tmpfs|cdrom' |
-        awk '{gsub(/%/,"",$5); if ($5+0 > max) max=$5} END {print max"%"}'
+        awk '{gsub(/%/,"",$5); if ($5+0 > max) max=$5} END {print max+0}'
       register: max_disk_pct
       changed_when: false
+      failed_when: false
 
     - name: Get memory usage
       command: free -h
       register: mem_usage
       changed_when: false
+      failed_when: false
 
     - name: Get last boot time
-      command: uptime 
+      command: uptime
       register: last_boot
       changed_when: false
+      failed_when: false
 
     - name: Get listening ports
-      shell: "ss -tulnp 2>/dev/null | awk 'NR>1 {print $1,$5}' || true"
+      shell: "ss -tulnp 2>/dev/null | awk 'NR>1 {print $1,$5}'"
       register: listening_ports
       changed_when: false
+      failed_when: false
 
     # ---------------------------------------------------------------------
-    # Per-host report (written on the control node)
+    # Per-host report (written to report_host -- see the note on
+    # report_host/report_dir in vars: above for why this isn't localhost)
     # ---------------------------------------------------------------------
-    # - name: Ensure report directory exists
-    #   file:
-    #     path: "{{ report_dir }}"
-    #     state: directory
-    #   delegate_to: localhost
-    #   become: false
+    - name: Ensure report directory exists
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: "{{ report_host }}"
+      run_once: true
 
-    # - name: Write per-host report
-    #   template:
-    #     src: templates/host_report.md.j2
-    #     dest: "{{ report_dir }}/{{ inventory_hostname }}.md"
-    #   delegate_to: localhost
-    #   become: false
+    - name: Write per-host report
+      template:
+        src: templates/host_report.md.j2
+        dest: "{{ report_dir }}/{{ inventory_hostname }}.md"
+      delegate_to: "{{ report_host }}"
 
   # -------------------------------------------------------------------------
   # Fleet-wide summary (runs once, after every host has reported in)
   # -------------------------------------------------------------------------
-  # post_tasks:
-  #   - name: Build fleet summary (CSV)
-  #     template:
-  #       src: templates/summary.csv.j2
-  #       dest: "{{ report_dir }}/summary.csv"
-  #     delegate_to: localhost
-  #     become: false
-  #     run_once: true
+  post_tasks:
+    - name: Build fleet summary (CSV)
+      template:
+        src: templates/summary.csv.j2
+        dest: "{{ report_dir }}/summary.csv"
+      delegate_to: "{{ report_host }}"
+      run_once: true
 
-  #   - name: Build fleet summary (Markdown)
-  #     template:
-  #       src: templates/summary.md.j2
-  #       dest: "{{ report_dir }}/summary.md"
-  #     delegate_to: localhost
-  #     become: false
-  #     run_once: true
+    - name: Build fleet summary (Markdown)
+      template:
+        src: templates/summary.md.j2
+        dest: "{{ report_dir }}/summary.md"
+      delegate_to: "{{ report_host }}"
+      run_once: true
 
+    - name: Build fleet summary (HTML dashboard)
+      template:
+        src: templates/summary.html.j2
+        dest: "{{ report_dir }}/summary.html"
+      delegate_to: "{{ report_host }}"
+      run_once: true
+
+    - name: Show where the reports landed
+      debug:
+        msg: >-
+          Reports written to {{ report_host }}:{{ report_dir }}/ --
+          open {{ report_dir }}/summary.html in a browser for the fleet
+          dashboard, or {{ report_dir }}/summary.md for a plain-text table.
+          (This job's execution pod is thrown away on exit -- report_host
+          is where these files actually live.)
+      run_once: true
+
+# =============================================================================
+# NOTE on dadabas01 (from job_42.txt)
+# =============================================================================
+# Every module invocation on dadabas01 died with the identical traceback,
+# always bottoming out at:
+#   .../module_utils/basic.py", line 5
+#   SyntaxError: future feature annotations is not defined
+#
+# `from __future__ import annotations` (PEP 563) requires Python >= 3.7.
+# ansible_facts.discovered_interpreter_python reports /usr/bin/python3 for
+# dadabas01 -- but unlike the other 4 hosts in this run (which all resolved
+# to /usr/bin/python3.11 and worked fine), whatever /usr/bin/python3
+# actually *is* on dadabas01 cannot execute that syntax. That means it's
+# either:
+#   a) genuinely older than 3.7 (unusual for a currently supported SLES
+#      release, but possible if it's a stale/parallel install), or
+#   b) a broken symlink, a pyenv/venv shim pointing at a partial or
+#      corrupted install, or something else shadowing the real
+#      interpreter on PATH.
+#
+# To confirm, on dadabas01 directly:
+#   ls -la /usr/bin/python3
+#   /usr/bin/python3 --version
+#   /usr/bin/python3 -c "from __future__ import annotations"
+#   which -a python3
+#   rpm -qf $(readlink -f /usr/bin/python3)     # if it's a symlink, what package owns the target?
+#
+# Until it's fixed on the box, point Ansible at the known-good interpreter
+# for that host (matching what the others resolved to), e.g. in inventory
+# or host_vars/dadabas01.yml:
+#   ansible_python_interpreter: /usr/bin/python3.11
+# =============================================================================

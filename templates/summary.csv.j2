@@ -1,0 +1,6 @@
+hostname,fqdn,os,os_version,kernel,interpreter,facts_ok,reboot_pending,ad_joined,falcon_status,max_disk_pct,patches_pending
+{% for h in ansible_play_hosts_all %}
+{% set hv = hostvars[h] %}
+{% set facts_ok = (hv.ansible_facts is defined and hv.ansible_facts | length > 0) %}
+{{ h }},{{ hv.resolved_fqdn | default(h) }},{{ hv.ansible_distribution | default('unknown') }},{{ hv.ansible_distribution_version | default('') }},{{ hv.ansible_kernel | default('unknown') }},{{ hv.discovered_interpreter_python | default('unknown') }},{{ 'yes' if facts_ok else 'no' }},{{ 'yes' if (hv.reboot_required_file is defined and hv.reboot_required_file.stat is defined and hv.reboot_required_file.stat.exists | default(false)) else 'no' }},{{ 'yes' if (hv.realm_status is defined and hv.realm_status.stdout is defined and hv.realm_status.stdout | trim | length > 0) else 'no' }},{{ hv.falcon_status.stdout | default('unknown') }},{{ hv.max_disk_pct.stdout | default('unknown') }},{{ 'yes' if (hv.zypper_lu is defined and hv.zypper_lu.stdout is defined and hv.zypper_lu.stdout | trim | length > 0) else ('n/a' if not (hv.zypper_lu is defined) else 'no') }}
+{% endfor %}

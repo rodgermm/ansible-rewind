@@ -1,0 +1,30 @@
+# Fleet Summary
+
+*Generated: {{ now(fmt='%Y-%m-%d %H:%M UTC') }}*
+
+| Host | FQDN | OS | Facts OK | Reboot Pending | AD Joined | Falcon | Max Disk % | Patches Pending |
+|---|---|---|---|---|---|---|---|---|
+{% for h in ansible_play_hosts_all %}
+{% set hv = hostvars[h] %}
+{% set facts_ok = (hv.ansible_facts is defined and hv.ansible_facts | length > 0) %}
+| {{ h }} | {{ hv.resolved_fqdn | default(h) }} | {{ hv.ansible_distribution | default('unknown') }} {{ hv.ansible_distribution_version | default('') }} | {{ '✅' if facts_ok else '❌' }} | {{ 'YES' if (hv.reboot_required_file is defined and hv.reboot_required_file.stat is defined and hv.reboot_required_file.stat.exists | default(false)) else 'no' }} | {{ 'yes' if (hv.realm_status is defined and hv.realm_status.stdout is defined and hv.realm_status.stdout | trim | length > 0) else 'no' }} | {{ hv.falcon_status.stdout | default('unknown') }} | {{ hv.max_disk_pct.stdout | default('?') }}% | {{ 'yes' if (hv.zypper_lu is defined and hv.zypper_lu.stdout is defined and hv.zypper_lu.stdout | trim | length > 0) else ('n/a' if not (hv.zypper_lu is defined) else 'no') }} |
+{% endfor %}
+
+## Findings requiring attention
+
+{% for h in ansible_play_hosts_all %}
+{% set hv = hostvars[h] %}
+{% set facts_ok = (hv.ansible_facts is defined and hv.ansible_facts | length > 0) %}
+{% if not facts_ok %}
+- **{{ h }}**: fact gathering failed -- interpreter `{{ hv.discovered_interpreter_python | default('unknown') }}` could not run Ansible modules. All data for this host is missing.
+{% endif %}
+{% if hv.falcon_status is defined and hv.falcon_status.stdout is defined and hv.falcon_status.stdout | trim != 'active' %}
+- **{{ h }}**: CrowdStrike Falcon sensor is `{{ hv.falcon_status.stdout | trim }}`.
+{% endif %}
+{% if hv.reboot_required_file is defined and hv.reboot_required_file.stat is defined and hv.reboot_required_file.stat.exists | default(false) %}
+- **{{ h }}**: reboot pending.
+{% endif %}
+{% if hv.max_disk_pct is defined and hv.max_disk_pct.stdout is defined and (hv.max_disk_pct.stdout | default('0') | int) >= 85 %}
+- **{{ h }}**: disk usage at {{ hv.max_disk_pct.stdout }}% on at least one filesystem.
+{% endif %}
+{% endfor %}
